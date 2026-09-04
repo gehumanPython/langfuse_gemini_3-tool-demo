@@ -51,11 +51,12 @@ INPUT_COST_PER_M  = 0.075
 OUTPUT_COST_PER_M = 0.30
 
 
-# ── Retry helper for transient Gemini 503 / 429 errors ───────────────────────
-def _is_retryable(exc: Exception) -> bool:
-    return isinstance(exc, genai_errors.ServerError) or (
-        isinstance(exc, genai_errors.ClientError) and "429" in str(exc)
-    )
+# ── Detect error type for user-friendly messages ─────────────────────────────
+def _is_rate_limit(exc: Exception) -> bool:
+    return isinstance(exc, genai_errors.ClientError) and "429" in str(exc)
+
+def _is_server_error(exc: Exception) -> bool:
+    return isinstance(exc, genai_errors.ServerError)
 
 
 # ── Streaming call — yields text chunks, logs to Langfuse manually ────────────
@@ -76,10 +77,18 @@ def stream_gemini(system: str, prompt: str, step_name: str, metrics: dict):
     ) as span:
         t0 = time.time()
 
+        # 503 server errors: retry quickly (3–30s backoff)
         @retry(
-            retry=retry_if_exception_type((genai_errors.ServerError, genai_errors.ClientError)),
+            retry=retry_if_exception_type(genai_errors.ServerError),
             wait=wait_exponential(multiplier=2, min=3, max=30),
             stop=stop_after_attempt(4),
+            reraise=True,
+        )
+        # 429 rate limit: retry slowly (60–120s backoff — free tier resets per minute)
+        @retry(
+            retry=retry_if_exception_type(genai_errors.ClientError),
+            wait=wait_exponential(multiplier=2, min=60, max=120),
+            stop=stop_after_attempt(3),
             reraise=True,
         )
         def _call_with_retry():
@@ -91,8 +100,17 @@ def stream_gemini(system: str, prompt: str, step_name: str, metrics: dict):
 
         try:
             chunks = _call_with_retry()
-        except (genai_errors.ServerError, genai_errors.ClientError) as e:
-            yield f"[Gemini unavailable after 4 retries — please try again in a moment. Error: {e}]"
+        except genai_errors.ClientError as e:
+            if "429" in str(e):
+                yield (
+                    "**Rate limit hit (429).** The free Gemini API allows ~15 requests/min. "
+                    "Please wait 1–2 minutes and try again."
+                )
+            else:
+                yield f"**API error:** {e}"
+            return
+        except genai_errors.ServerError as e:
+            yield f"**Gemini server unavailable after retries.** Please try again shortly. ({e})"
             return
 
         for chunk in chunks:
@@ -124,6 +142,11 @@ def stream_gemini(system: str, prompt: str, step_name: str, metrics: dict):
 # ── Streamlit UI ──────────────────────────────────────────────────────────────
 st.title("AI Research Assistant")
 st.caption("Powered by Gemini · Observability by Langfuse")
+st.info(
+    "**Free tier limits:** Gemini allows ~15 requests/min and 1,500/day. "
+    "Each pipeline run uses 3 requests. Wait **1–2 minutes** between runs to avoid rate limits.",
+    icon="ℹ️",
+)
 st.divider()
 
 topic   = st.text_input(
