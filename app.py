@@ -27,13 +27,21 @@ st.set_page_config(
     layout="wide",
 )
 
+# ── Secret loader: Streamlit Cloud (st.secrets) → local .env fallback ─────────
+def get_secret(key: str, default: str = "") -> str:
+    """Works both on Streamlit Community Cloud and locally."""
+    try:
+        return st.secrets[key]
+    except (KeyError, FileNotFoundError):
+        return os.getenv(key, default)
+
 # ── Client setup ──────────────────────────────────────────────────────────────
-gemini = google_genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+gemini = google_genai.Client(api_key=get_secret("GEMINI_API_KEY"))
 
 langfuse_client = Langfuse(
-    public_key=os.getenv("LANGFUSE_PUBLIC_KEY"),
-    secret_key=os.getenv("LANGFUSE_SECRET_KEY"),
-    host=os.getenv("LANGFUSE_HOST") or os.getenv("LANGFUSE_BASE_URL", "https://cloud.langfuse.com"),
+    public_key=get_secret("LANGFUSE_PUBLIC_KEY"),
+    secret_key=get_secret("LANGFUSE_SECRET_KEY"),
+    host=get_secret("LANGFUSE_HOST") or get_secret("LANGFUSE_BASE_URL", "https://cloud.langfuse.com"),
 )
 
 MODEL = "gemini-3.6-flash"
